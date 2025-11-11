@@ -2,19 +2,22 @@
 #include "esp_err.h"
 #include "esp_private/wifi.h"
 #include "freertos/event_groups.h"
-
+#include <inttypes.h>
 // Tag for debug messages
 static const char* TAG = "WIFI_STA";
 
 // Static global variables
 static esp_netif_t *s_wifi_netif = NULL;
 static EventGroupHandle_t s_wifi_event_group = NULL;
+static EventGroupHandle_t s_wifi_chosen_group = NULL;
 static wifi_netif_driver_t *s_wifi_netif_driver = NULL;
+static uint8_t reconnect_count = 0;
 
 /******************************
  * Private functions prototypes
  */
 
+// Private callback functions
 static void on_wifi_event   (void* arg,
                             esp_event_base_t event_base,
                             int32_t event_id,
@@ -25,14 +28,35 @@ static void on_ip_event     (void* arg,
                             int32_t event_id,
                             void* event_data);
 
-static void wifi_start      (void* esp_netif,
+static void wifi_start_cb      (void* esp_netif,
                             esp_event_base_t event_base,
                             int32_t event_id,
-                            void* event_data);                          
+                            void* event_data);
+
+static void wifi_stop_cb       (void* esp_netif,
+                            esp_event_base_t event_base,
+                            int32_t event_id,
+                            void* event_data);
+
+static void wifi_connected_cb   (void* esp_netif,
+                            esp_event_base_t event_base,
+                            int32_t event_id,
+                            void* event_data);                            
+
+static void wifi_scan_done_cb ();
+
+static void wifi_disconnected_cb ();
+
+// Private support function                            
+static void reconnect_wifi ();
+
+static void scan_wifi ();
+
 /*******************************
  *  Private functions implementation
  */
 
+// Private callback functions
 static void on_wifi_event   (void* arg,
                             esp_event_base_t event_base,
                             int32_t event_id,
@@ -41,12 +65,12 @@ static void on_wifi_event   (void* arg,
     switch (event_id){
         case WIFI_EVENT_STA_START:  // Wifi start
             if (s_wifi_netif != NULL){
-                wifi_start (s_wifi_netif, event_base, event_id, event_data);
+                wifi_start_cb (s_wifi_netif, event_base, event_id, event_data);                
             }
             break;
         case WIFI_EVENT_STA_STOP:  // Wifi stop
             if (s_wifi_netif != NULL){
-                esp_netif_action_stop (s_wifi_netif, event_base, event_id, event_data);
+                wifi_stop_cb (s_wifi_netif, event_base, event_id, event_data);
             }
             break;
         case WIFI_EVENT_STA_CONNECTED: // Connect to wifi
@@ -55,36 +79,16 @@ static void on_wifi_event   (void* arg,
                 ESP_LOGE (TAG, "Wifi not started: Interface handle is NULL");
                 return;
             }
-            wifi_event_sta_connected_t *event_sta_connected = (wifi_event_sta_connected_t*) event_data;
-            ESP_LOGI (TAG, "Connected to AP");
-            ESP_LOGI (TAG, "SSID: %s", (char*) event_sta_connected->ssid);
-            ESP_LOGI (TAG, "Channel: %d", event_sta_connected->channel);
-            ESP_LOGI (TAG, "Auth mode: %d", event_sta_connected->authmode);
-            ESP_LOGI (TAG, "AID: %d", event_sta_connected->aid);
-
-            // Register interface receive callback
-            wifi_netif_driver_t driver = esp_netif_get_io_driver(s_wifi_netif);
-            if (!esp_wifi_is_if_ready_when_started(driver)) {
-                esp_err_t esp_ret = esp_wifi_register_if_rxcb(driver,
-                                                    esp_netif_receive,
-                                                    s_wifi_netif);
-                if (esp_ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to register WiFi RX callback");
-                    return;
-                }
-            }
-            
-            //  Set up the WiFi interface and start DHCP process
-            esp_netif_action_connected(s_wifi_netif, 
-                                       event_base, 
-                                       event_id, 
-                                       event_data);
-            
-            // Set wifi connected bit
-            xEventGroupSetBits (s_wifi_event_group, WIFI_STA_CONNECTED_BIT);
+            wifi_connected_cb (s_wifi_netif, event_base, event_id, event_data);
+            break;
+        case WIFI_EVENT_STA_DISCONNECTED:
+            wifi_disconnected_cb();
+            break;
+        case WIFI_EVENT_SCAN_DONE:
+            wifi_scan_done_cb();
             break;
         default:
-            ESP_LOGI (TAG, "Unexpected behavior in WiFi event");
+            ESP_LOGI(TAG, "Unexpected behavior %" PRId32 " in WiFi event", event_id);
             break;
     }
 }
@@ -108,7 +112,7 @@ void on_ip_event    (void *arg,
             ESP_LOGI (TAG, "Wifi lost IP address");
             break;
         default:
-            ESP_LOGE (TAG, "Unexpected behavior in IP event");
+            ESP_LOGI(TAG, "Unexpected behavior %" PRId32 " in IP event", event_id);
             break;
     }
 }
@@ -117,7 +121,7 @@ void on_ip_event    (void *arg,
  * @brief Set up the wifi interface and start DHCP process
  * Called from on_wifi_event
  */
-static void wifi_start (void* esp_netif,
+static void wifi_start_cb (void* esp_netif,
                         esp_event_base_t event_base,
                         int32_t event_id,
                         void* event_data)
@@ -170,6 +174,140 @@ static void wifi_start (void* esp_netif,
     }
 }
 
+/**
+ * @brief 
+*/
+static void wifi_stop_cb       (void* esp_netif,
+                                esp_event_base_t event_base,
+                                int32_t event_id,
+                                void* event_data)
+{
+    if (s_wifi_netif != NULL) {
+        esp_netif_action_stop(s_wifi_netif, 
+                                event_base, 
+                                event_id, 
+                                event_data);
+    }    
+}
+
+/**
+ * @brief
+ */
+static void wifi_connected_cb   (void* esp_netif,
+                                esp_event_base_t event_base,
+                                int32_t event_id,
+                                void* event_data)
+{
+    wifi_event_sta_connected_t *event_sta_connected = (wifi_event_sta_connected_t*) event_data;
+    ESP_LOGI (TAG, "Connected to AP");
+    ESP_LOGI (TAG, "SSID: %s", (char*) event_sta_connected->ssid);
+    ESP_LOGI (TAG, "Channel: %d", event_sta_connected->channel);
+    ESP_LOGI (TAG, "Auth mode: %d", event_sta_connected->authmode);
+    ESP_LOGI (TAG, "AID: %d", event_sta_connected->aid);
+
+    // Register interface receive callback
+    wifi_netif_driver_t driver = esp_netif_get_io_driver(s_wifi_netif);
+    if (!esp_wifi_is_if_ready_when_started(driver)) {
+        esp_err_t esp_ret = esp_wifi_register_if_rxcb(driver,
+                                            esp_netif_receive,
+                                            s_wifi_netif);
+        if (esp_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register WiFi RX callback");
+            return;
+        }
+    }
+    
+    //  Set up the WiFi interface and start DHCP process
+    esp_netif_action_connected(s_wifi_netif, 
+                                event_base, 
+                                event_id, 
+                                event_data);
+    
+    // Set wifi connected bit
+    xEventGroupSetBits (s_wifi_event_group, WIFI_STA_CONNECTED_BIT);
+}
+
+static void wifi_disconnected_cb(){
+    EventBits_t chosen = xEventGroupGetBits (s_wifi_chosen_group);
+    if (chosen & WIFI_CHOSEN_STA_STOP){
+        // User call stop function                
+        ESP_LOGI (TAG, "Diconnect is caused by stop function");
+    }
+    else if (chosen & WIFI_CHOSEN_STA_DISCONNECT){
+        // User call disconnect function                
+        ESP_LOGI (TAG, "Disconnect successfully from %s", CONFIG_WIFI_STA_SSID);
+    }
+    else{
+        // Connect failed from esp_connect function
+        ESP_LOGE (TAG, "Connect failed to %s", CONFIG_WIFI_STA_SSID);
+        if (chosen & WIFI_CHOSEN_STA_RECONENCT && reconnect_count < 6){
+            // Reconnect is chosen                    
+            reconnect_wifi();
+        }
+        else{
+            // Reconenct is not chosen or run over reconnect count
+            ESP_LOGE (TAG ,"Cannot connect to %s",CONFIG_WIFI_STA_SSID);
+            // Scan wifi avaliable
+            scan_wifi();
+        }
+    }
+}
+
+static void wifi_scan_done_cb(){
+    uint16_t ap_num;
+    esp_err_t esp_ret = esp_wifi_scan_get_ap_num(&ap_num);
+    if (esp_ret != ESP_OK){
+        ESP_LOGE (TAG, "Failed to get the number of scanned AP");
+        return;
+    }
+    ESP_LOGI (TAG, "Scanned sucessfully with %d scanned AP",ap_num);
+    // Allocate array to hold return ap_record 
+    wifi_ap_record_t* ap_record = (wifi_ap_record_t*) malloc(sizeof(wifi_ap_record_t) * ap_num);
+    esp_ret = esp_wifi_scan_get_ap_records (&ap_num,ap_record); 
+    if (esp_ret != ESP_OK){
+        ESP_LOGE (TAG, "Failed to get AP record");
+        return;
+    }
+    for (int i = 0; i < ap_num ; i++ ){
+        ESP_LOGI (TAG, "Scanned wifi: %d", i);
+        ESP_LOGI (TAG, "SSID: %s", ap_record[i].ssid);
+        ESP_LOGI (TAG, "Auth Mode %d", ap_record[i].authmode);
+    }
+}
+
+// Private support functions
+/**
+ * @brief
+ */
+static void reconnect_wifi(){
+    esp_err_t esp_ret = esp_wifi_connect();
+    if (esp_ret != ESP_OK){
+        ESP_LOGE (TAG, "Failled to reconnect to %s",CONFIG_WIFI_STA_SSID);
+    }
+    ESP_LOGI (TAG, "Reconnect to %s: %d",CONFIG_WIFI_STA_SSID,reconnect_count);
+    reconnect_count++;
+}
+ 
+/**
+ * @brief
+ */
+static void scan_wifi(){
+    const wifi_scan_config_t scan_config = {
+                        .ssid = NULL, // Scan all SSID
+                        .bssid = NULL, // Scan all BSSID
+                        .channel = 1,
+                        .show_hidden = 0,
+                        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+                        .scan_time.active.max = 0,
+                        .scan_time.active.min = 0 //  min=0, max=0: scan dwells on each channel for 120 ms.
+                        };
+    esp_err_t esp_ret = esp_wifi_scan_start(&scan_config,false); // Non blocking
+    if (esp_ret != ESP_OK){
+        ESP_LOGE (TAG, "Failed to scan wifi");
+        return;
+    }
+}
+
 /*******************************************************************
  * Public function implement
  */
@@ -184,7 +322,12 @@ esp_err_t wifi_sta_init (EventGroupHandle_t event_group){
         return ESP_FAIL;
     }
     s_wifi_event_group = event_group;
-    
+    s_wifi_chosen_group = xEventGroupCreate();
+    if (s_wifi_chosen_group == NULL) {
+        ESP_LOGE(TAG, "Failed to create chosen event group");
+        return ESP_FAIL;
+    }
+
     //  (s1.3) Create default WiFi network interface
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_WIFI_STA();
     s_wifi_netif = esp_netif_new(&netif_cfg);
@@ -267,9 +410,6 @@ esp_err_t wifi_sta_init (EventGroupHandle_t event_group){
 }    
 
 esp_err_t wifi_sta_stop (void){
-    return ESP_OK;
-}
-
-esp_err_t wifi_sta_reconnect (void){
-    return ESP_OK;
+    xEventGroupSetBits (s_wifi_chosen_group,WIFI_CHOSEN_STA_STOP);
+    return esp_wifi_stop();
 }

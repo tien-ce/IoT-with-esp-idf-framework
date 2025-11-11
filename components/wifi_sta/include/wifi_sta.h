@@ -13,6 +13,15 @@
 #define WIFI_STA_IPV6_OBTAINED_BIT  BIT2
 
 /**
+ * @brief Event group bits for User Selection
+ */
+#define WIFI_CHOSEN_STA_MODE BIT0
+#define WIFI_CHOSEN_AP_MODE BIT1
+#define WIFI_CHOSEN_STA_RECONENCT BIT2
+#define WIFI_CHOSEN_STA_DISCONNECT BIT3
+#define WIFI_CHOSEN_STA_STOP BIT4
+
+/**
  * @brief Initialize Wifi in station (STA) mode
  * Set up the WiFi interface and connection and IP address assignment
  * !! You must call esp_netif_init() and esp_event_loop_create_default() before call this function.
@@ -35,15 +44,5 @@ esp_err_t wifi_sta_init (EventGroupHandle_t event_group);
  */
 
  esp_err_t wifi_sta_stop(void);
-
- /**
-  * @brief Attempt to recoonect WiFi
-  * 
-  * @return 
-  * - ESP_OK : On success
-  * - Other errors on failure
-  */
-
-esp_err_t wifi_sta_reconnect (void);
 
 #endif // WIFI_STA_H
