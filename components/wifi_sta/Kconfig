@@ -1,0 +1,13 @@
+menu "WiFi STA Configuration"
+        config WIFI_STA_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                Network name (SSID) to connect to.
+
+        config WIFI_STA_PASSWORD
+            string "WiFi password"
+            default "mypassword"        
+            help 
+                Password (PASSWORD) to conect to.    
+endmenu
