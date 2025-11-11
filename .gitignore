@@ -1,0 +1,13 @@
+**/build/
+**/.venv/
+**/venv/
+**/sdkconfig
+**/sdkconfig.old
+**/sdkconfig.bak
+**/sdkconfig.projbuild
+**/sdkconfig.projbuild.old
+**/sdkconfig.projbuild.defaults
+**/sdkconfig.projbuild.bak
+*.lock
+/.vscode
+/.devcontainer
