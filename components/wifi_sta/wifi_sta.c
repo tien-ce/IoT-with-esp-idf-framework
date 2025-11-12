@@ -3,13 +3,14 @@
 #include "esp_private/wifi.h"
 #include "freertos/event_groups.h"
 #include <inttypes.h>
+// Extern event group from header file
+EventGroupHandle_t e_wifi_event_group = NULL;
+
 // Tag for debug messages
 static const char* TAG = "WIFI_STA";
 
 // Static global variables
 static esp_netif_t *s_wifi_netif = NULL;
-static EventGroupHandle_t s_wifi_event_group = NULL;
-static EventGroupHandle_t s_wifi_chosen_group = NULL;
 static wifi_netif_driver_t *s_wifi_netif_driver = NULL;
 static uint8_t reconnect_count = 0;
 
@@ -50,7 +51,6 @@ static void wifi_disconnected_cb ();
 // Private support function                            
 static void reconnect_wifi ();
 
-static void scan_wifi ();
 
 /*******************************
  *  Private functions implementation
@@ -106,7 +106,7 @@ void on_ip_event    (void *arg,
             ESP_LOGI (TAG, "IP address: " IPSTR, IP2STR(&ip_info->ip));
             ESP_LOGI (TAG, "Net mask: " IPSTR, IP2STR(&ip_info->netmask));
             ESP_LOGI (TAG, "Gateway IP: " IPSTR, IP2STR(&ip_info->gw));
-            xEventGroupSetBits (s_wifi_event_group, WIFI_STA_IPV4_OBTAINED_BIT);
+            xEventGroupSetBits (e_wifi_event_group, WIFI_STA_IPV4_OBTAINED_BIT);
             break;
         case IP_EVENT_STA_LOST_IP:
             ESP_LOGI (TAG, "Wifi lost IP address");
@@ -168,7 +168,7 @@ static void wifi_start_cb (void* esp_netif,
 
     // Connect to wifi
     ESP_LOGI (TAG, "Connect to wifi %s",CONFIG_WIFI_STA_SSID);
-    esp_ret = esp_wifi_connect();
+    // esp_ret = esp_wifi_connect(); 
     if (esp_ret != ESP_OK){
         ESP_LOGE (TAG, "Failed to connect to WiFi");
     }
@@ -224,16 +224,16 @@ static void wifi_connected_cb   (void* esp_netif,
                                 event_data);
     
     // Set wifi connected bit
-    xEventGroupSetBits (s_wifi_event_group, WIFI_STA_CONNECTED_BIT);
+    xEventGroupSetBits (e_wifi_event_group, WIFI_STA_CONNECTED_BIT);
 }
 
 static void wifi_disconnected_cb(){
-    EventBits_t chosen = xEventGroupGetBits (s_wifi_chosen_group);
-    if (chosen & WIFI_CHOSEN_STA_STOP){
+    EventBits_t chosen = xEventGroupGetBits (e_wifi_event_group);
+    if (chosen & WIFI_STA_STOP){
         // User call stop function                
         ESP_LOGI (TAG, "Diconnect is caused by stop function");
     }
-    else if (chosen & WIFI_CHOSEN_STA_DISCONNECT){
+    else if (chosen & WIFI_STA_DISCONNECT){
         // User call disconnect function                
         ESP_LOGI (TAG, "Disconnect successfully from %s", CONFIG_WIFI_STA_SSID);
     }
@@ -247,32 +247,12 @@ static void wifi_disconnected_cb(){
         else{
             // Reconenct is not chosen or run over reconnect count
             ESP_LOGE (TAG ,"Cannot connect to %s",CONFIG_WIFI_STA_SSID);
-            // Scan wifi avaliable
-            scan_wifi();
         }
     }
 }
 
 static void wifi_scan_done_cb(){
-    uint16_t ap_num;
-    esp_err_t esp_ret = esp_wifi_scan_get_ap_num(&ap_num);
-    if (esp_ret != ESP_OK){
-        ESP_LOGE (TAG, "Failed to get the number of scanned AP");
-        return;
-    }
-    ESP_LOGI (TAG, "Scanned sucessfully with %d scanned AP",ap_num);
-    // Allocate array to hold return ap_record 
-    wifi_ap_record_t* ap_record = (wifi_ap_record_t*) malloc(sizeof(wifi_ap_record_t) * ap_num);
-    esp_ret = esp_wifi_scan_get_ap_records (&ap_num,ap_record); 
-    if (esp_ret != ESP_OK){
-        ESP_LOGE (TAG, "Failed to get AP record");
-        return;
-    }
-    for (int i = 0; i < ap_num ; i++ ){
-        ESP_LOGI (TAG, "Scanned wifi: %d", i);
-        ESP_LOGI (TAG, "SSID: %s", ap_record[i].ssid);
-        ESP_LOGI (TAG, "Auth Mode %d", ap_record[i].authmode);
-    }
+    xEventGroupSetBits (e_wifi_event_group,WIFI_STA_SCAN_DONE);
 }
 
 // Private support functions
@@ -288,25 +268,7 @@ static void reconnect_wifi(){
     reconnect_count++;
 }
  
-/**
- * @brief
- */
-static void scan_wifi(){
-    const wifi_scan_config_t scan_config = {
-                        .ssid = NULL, // Scan all SSID
-                        .bssid = NULL, // Scan all BSSID
-                        .channel = 1,
-                        .show_hidden = 0,
-                        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-                        .scan_time.active.max = 0,
-                        .scan_time.active.min = 0 //  min=0, max=0: scan dwells on each channel for 120 ms.
-                        };
-    esp_err_t esp_ret = esp_wifi_scan_start(&scan_config,false); // Non blocking
-    if (esp_ret != ESP_OK){
-        ESP_LOGE (TAG, "Failed to scan wifi");
-        return;
-    }
-}
+
 
 /*******************************************************************
  * Public function implement
@@ -321,12 +283,7 @@ esp_err_t wifi_sta_init (EventGroupHandle_t event_group){
         ESP_LOGE (TAG, "Event group handle is not be initialize");
         return ESP_FAIL;
     }
-    s_wifi_event_group = event_group;
-    s_wifi_chosen_group = xEventGroupCreate();
-    if (s_wifi_chosen_group == NULL) {
-        ESP_LOGE(TAG, "Failed to create chosen event group");
-        return ESP_FAIL;
-    }
+    e_wifi_event_group = event_group;
 
     //  (s1.3) Create default WiFi network interface
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_WIFI_STA();
@@ -360,16 +317,16 @@ esp_err_t wifi_sta_init (EventGroupHandle_t event_group){
         return ESP_FAIL;
     }
 
-    // Register IP event                                          
-    esp_ret = esp_event_handler_register (IP_EVENT,
-                                          ESP_EVENT_ANY_ID,
-                                          &on_ip_event,
-                                          NULL);
+    // // Register IP event                                          
+    // esp_ret = esp_event_handler_register (IP_EVENT,
+    //                                       ESP_EVENT_ANY_ID,
+    //                                       &on_ip_event,
+    //                                       NULL);
     
-    if (esp_ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register IP event handler");
-        return ESP_FAIL;
-    }
+    // if (esp_ret != ESP_OK) {
+    //     ESP_LOGE(TAG, "Failed to register IP event handler");
+    //     return ESP_FAIL;
+    // }
     
     // Initialize Wifi
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -410,6 +367,7 @@ esp_err_t wifi_sta_init (EventGroupHandle_t event_group){
 }    
 
 esp_err_t wifi_sta_stop (void){
-    xEventGroupSetBits (s_wifi_chosen_group,WIFI_CHOSEN_STA_STOP);
+    xEventGroupSetBits (e_wifi_event_group,WIFI_STA_STOP);
     return esp_wifi_stop();
 }
+
